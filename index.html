@@ -249,6 +249,7 @@ textarea{font-family:inherit}
 <!-- Firebase SDK -->
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 </head>
 <body>
 <div id="page-login" class="login-page">
@@ -360,96 +361,81 @@ const COURSES_DATA={"6eme": [{"id": "6-1", "title": "Nombres entiers et décimau
 // ================================================================
 // APP STATE
 // ================================================================
-let APP={user:null,type:null,teacher:{username:"Gilbert Galas",password:"Gilou98*"},students:[],requests:{questions:[],revisions:[]},joinRequests:[],currentClass:"6eme",currentCourse:null,editIdx:null,comments:{},timeTracker:{},_rIdx:null};
-function load(){
-  // Fallback: load from localStorage while Firebase connects
-  try{
-    const s=localStorage.getItem("cnm3");
-    if(s){const p=JSON.parse(s);APP.students=p.students||[];APP.requests=p.requests||{questions:[],revisions:[]};APP.comments=p.comments||{};APP.timeTracker=p.timeTracker||{};APP.joinRequests=p.joinRequests||[];}
-  }catch(e){}
-}
-function save(){
-  // Save to both localStorage (offline fallback) and Firebase (sync)
-  try{
-    const data={students:APP.students,requests:APP.requests,comments:APP.comments,timeTracker:APP.timeTracker,joinRequests:APP.joinRequests};
-    localStorage.setItem("cnm3",JSON.stringify(data));
-    if(window._fbReady&&window._dbRef){
-      window._dbRef.set(data).catch(function(err){console.warn("Firebase save error:",err);});
-    }
-  }catch(e){console.warn("Save error:",e);}
-}
-load(); // Load from localStorage first (offline fallback)
-
+let APP={user:null,type:null,teacher:{username:"Gilbert Galas"},attachments:{},students:[],requests:{questions:[],revisions:[]},joinRequests:[],currentClass:"6eme",currentCourse:null,editIdx:null,comments:{},timeTracker:{},_rIdx:null};
+// Données en mémoire (chargées selon le rôle de l'utilisateur connecté)
+var APP_TAG="snm", NS="snm", LEGACY="appData", LEGACY_LS="cnm3";
 // ================================================================
-// FIREBASE INITIALIZATION
+// SÉCURITÉ FIREBASE — connexion par comptes (Firebase Authentication)
 // ================================================================
+var ADMIN_EMAIL="gigalas61@gmail.com";
+var FB_CFG={
+  apiKey:"AIzaSyBcmyPN2fF_XI22XeIo5TNOlYV7ilNeQAw",
+  authDomain:"senoumenm-maths.firebaseapp.com",
+  databaseURL:"https://senoumenm-maths-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId:"senoumenm-maths",
+  storageBucket:"senoumenm-maths.firebasestorage.app",
+  messagingSenderId:"953187694673",
+  appId:"1:953187694673:web:ebdcda9cf05a5ecae96070"
+};
+var FB={db:null,auth:null,sec:null,subs:[]};
 (function initFirebase(){
-  const firebaseConfig = {
-    apiKey: "AIzaSyBcmyPN2fF_XI22XeIo5TNOlYV7ilNeQAw",
-    authDomain: "senoumenm-maths.firebaseapp.com",
-    databaseURL: "https://senoumenm-maths-default-rtdb.europe-west1.firebasedatabase.app",
-    projectId: "senoumenm-maths",
-    storageBucket: "senoumenm-maths.firebasestorage.app",
-    messagingSenderId: "953187694673",
-    appId: "1:953187694673:web:ebdcda9cf05a5ecae96070"
-  };
-
-  try {
-    // Initialize Firebase
-    if(typeof firebase !== 'undefined' && firebase.initializeApp){
-      const app = firebase.initializeApp(firebaseConfig);
-      const db = firebase.database();
-      window._dbRef = db.ref("appData");
-      window._fbReady = true;
-
-      // Listen for real-time changes from Firebase
-      window._dbRef.on("value", function(snapshot){
-        const data = snapshot.val();
-        if(data){
-          // Update APP state from Firebase
-          APP.students = data.students || [];
-          APP.requests = data.requests || {questions:[],revisions:[]};
-          APP.comments = data.comments || {};
-          APP.timeTracker = data.timeTracker || {};
-          APP.joinRequests = data.joinRequests || [];
-          // Also cache in localStorage
-          try{localStorage.setItem("cnm3",JSON.stringify(data));}catch(e){}
-          // Refresh UI if on teacher or student page
-          if(!document.getElementById("page-teacher").classList.contains("hidden")){
-            renderStudents();
-          }
-        }
-      }, function(err){
-        console.warn("Firebase read error:", err);
-        window._fbReady = false;
-      });
-
-      // Push local data to Firebase if Firebase is empty
-      window._dbRef.once("value", function(snapshot){
-        if(!snapshot.val()){
-          // Firebase is empty, push current local data
-          const localData = {students:APP.students,requests:APP.requests,comments:APP.comments,timeTracker:APP.timeTracker,joinRequests:APP.joinRequests};
-          if(localData.students.length > 0 || localData.joinRequests.length > 0){
-            window._dbRef.set(localData);
-          }
-        }
-      });
-
-      console.log("Firebase connecté avec succès !");
-      // Show connection status
-      var ci = document.getElementById("firebase-status");
-      if(ci){ci.textContent="🟢 Connecté";ci.style.color="#27ae60";}
-    } else {
-      console.warn("Firebase SDK non chargé - mode hors-ligne (localStorage uniquement)");
-      window._fbReady = false;
-      var ci = document.getElementById("firebase-status");
-      if(ci){ci.textContent="🔴 Hors-ligne";ci.style.color="#e74c3c";}
-    }
-  } catch(e){
-    console.warn("Firebase init error:", e);
-    window._fbReady = false;
+  try{localStorage.removeItem(LEGACY_LS);}catch(e){}
+  var st=document.getElementById("firebase-status");
+  try{
+    firebase.initializeApp(FB_CFG);
+    FB.db=firebase.database();
+    FB.auth=firebase.auth();
+    FB.auth.setPersistence(firebase.auth.Auth.Persistence.SESSION).catch(function(){});
+    // Instance secondaire : créer / modifier des comptes sans déconnecter l'utilisateur courant
+    FB.sec=firebase.initializeApp(FB_CFG,"secondaire").auth();
+    FB.sec.setPersistence(firebase.auth.Auth.Persistence.NONE).catch(function(){});
+    FB.db.ref(".info/connected").on("value",function(s){
+      if(!st)return;
+      if(s.val()){st.textContent="🟢 Connecté";st.style.color="#27ae60";}
+      else{st.textContent="🔴 Hors-ligne";st.style.color="#e74c3c";}
+    });
+  }catch(e){
+    console.warn("Firebase init error:",e);
+    if(st){st.textContent="🔴 Hors-ligne";st.style.color="#e74c3c";}
   }
 })();
+function fbRef(p){return FB.db.ref(p);}
+function fbOn(path,cb,query){
+  var r=query?query(fbRef(path)):fbRef(path);
+  var h=r.on("value",function(s){cb(s.val());},function(e){console.warn("Lecture refusée :",path,e&&e.code);});
+  FB.subs.push(function(){r.off("value",h);});
+}
+function fbOffAll(){FB.subs.forEach(function(f){try{f();}catch(e){}});FB.subs=[];}
+function fbErr(e){console.warn(e);alert("Erreur d'enregistrement : "+(e&&e.message?e.message:e));}
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
+function slugName(n){
+  var s=String(n).normalize("NFD").replace(/[̀-ͯ]/g,"").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+  if(!s){s="u";for(var i=0;i<n.length;i++)s+=n.charCodeAt(i).toString(16);}
+  return s.slice(0,60);
+}
+function acctEmail(role,name){return role+"."+APP_TAG+"."+slugName(name)+"@senoumenm-maths.firebaseapp.com";}
+function acctPwd(p){return "SnM!"+p+"#"+APP_TAG;}
+function authMsg(e){
+  var c=(e&&e.code)||"";
+  if(c==="auth/too-many-requests")return "Trop de tentatives. Réessayez dans quelques minutes.";
+  if(c==="auth/network-request-failed")return "Pas de connexion Internet.";
+  if(c==="auth/email-already-in-use")return "Un compte existe déjà avec ce nom.";
+  if(c==="auth/weak-password")return "Mot de passe trop faible.";
+  if(/wrong-password|user-not-found|invalid-credential|invalid-login|invalid-email|user-disabled/.test(c))return "Nom ou mot de passe incorrect.";
+  if(c==="app/no-profile")return "Compte non configuré. Contactez l'administrateur.";
+  if(c==="PERMISSION_DENIED"||/permission/i.test(c))return "Action non autorisée.";
+  return "Erreur : "+((e&&e.message)||c);
+}
+async function secCreate(email,pwd){var c=await FB.sec.createUserWithEmailAndPassword(email,pwd);var uid=c.user.uid;await FB.sec.signOut();return uid;}
+async function secWith(email,pwd,fn){var c=await FB.sec.signInWithEmailAndPassword(email,pwd);try{return await fn(c.user);}finally{await FB.sec.signOut();}}
+async function secUid(email,pwd){return secWith(email,pwd,function(u){return u.uid;});}
+// Crée le compte, ou récupère son identifiant s'il existe déjà avec ce mot de passe
+async function secEnsure(email,pwd){
+  try{return await secCreate(email,pwd);}
+  catch(e){if(e&&e.code==="auth/email-already-in-use")return await secUid(email,pwd);throw e;}
+}
+function toArr(o){return Object.keys(o||{}).map(function(k){var v=o[k]||{};v.uid=k;return v;});}
+function flatReq(o){var a=[];Object.keys(o||{}).forEach(function(c){Object.keys(o[c]||{}).forEach(function(k){var q=o[c][k];q._c=c;q._k=k;a.push(q);});});return a;}
 
 // Time tracking
 let _ti=null,_tc=null,_ts=null;
@@ -882,6 +868,253 @@ function attachFile(ck,input){
   };
   reader.readAsDataURL(file);
 }
+
+// ================================================================
+// SÉCURITÉ — remplacements des fonctions de synchronisation / connexion
+// (ces définitions remplacent les versions précédentes du même nom)
+// ================================================================
+var _me=null; // élève connecté {uid,name,...}
+function snmReset(){APP.students=[];APP.requests={questions:[],revisions:[]};APP.joinRequests=[];APP.comments={};APP.timeTracker={};APP.attachments={};}
+function nameOfStudent(uid){var s=APP.students.find(function(x){return x.uid===uid;});return s?s.name:null;}
+function ingestPer(kind,sid,val){
+  var n=nameOfStudent(sid);if(!n)return;
+  if(kind==="tt"){APP.timeTracker[n]=val||{};return;}
+  var tgt=kind==="cm"?APP.comments:APP.attachments;
+  Object.keys(tgt).forEach(function(k){if(k.slice(-(n.length+1))==="_"+n)delete tgt[k];});
+  Object.keys(val||{}).forEach(function(cid){tgt[cid+"_"+n]=val[cid];});
+}
+function flatList(o){return Object.keys(o||{}).map(function(k){var q=o[k];q._k=k;return q;});}
+function startSync(role,uid){
+  fbOffAll();snmReset();
+  if(role==="prof"){
+    fbOn(NS,function(a){
+      a=a||{};
+      APP.students=toArr(a.students).sort(function(x,y){return x.name.localeCompare(y.name);});
+      APP.requests.questions=flatList(a.questions);APP.requests.revisions=flatList(a.revisions);
+      APP.joinRequests=flatList(a.joinRequests);
+      APP.comments={};APP.timeTracker={};APP.attachments={};
+      Object.keys(a.comments||{}).forEach(function(s){ingestPer("cm",s,a.comments[s]);});
+      Object.keys(a.timeTracker||{}).forEach(function(s){ingestPer("tt",s,a.timeTracker[s]);});
+      Object.keys(a.attachments||{}).forEach(function(s){ingestPer("at",s,a.attachments[s]);});
+      if(!document.getElementById("page-teacher").classList.contains("hidden"))renderStudents();
+    });
+  }else{
+    fbOn(NS+"/students/"+uid,function(s){if(!s)return;s.uid=uid;if(_me)Object.assign(_me,s);APP.students=[_me||s];});
+    fbOn(NS+"/comments/"+uid,function(v){ingestPer("cm",uid,v);});
+    fbRef(NS+"/timeTracker/"+uid).once("value").then(function(s){
+      var n=nameOfStudent(uid);if(!n)return;var r=s.val()||{},loc=APP.timeTracker[n]||{};
+      Object.keys(r).forEach(function(k){loc[k]=Math.max(loc[k]||0,r[k]||0);});APP.timeTracker[n]=loc;
+    }).catch(function(e){console.warn(e);});
+  }
+}
+function load(){}
+function save(){
+  if(APP.type!=="eleve"||!_me||!FB.auth||!FB.auth.currentUser)return Promise.resolve();
+  var tt=APP.timeTracker[_me.name];if(!tt)return Promise.resolve();
+  return fbRef(NS+"/timeTracker/"+_me.uid).update(tt).catch(function(e){console.warn("Temps non enregistré :",e);});
+}
+function stopTrack(){if(_ti){clearInterval(_ti);_ti=null;return save();}return Promise.resolve();}
+
+// ---------- Connexion
+function goToPassword(){
+  const u=document.getElementById("login-username").value.trim();
+  const t=document.getElementById("login-type").value;
+  if(!u)return showErr("login-error","Entrez un nom d'utilisateur.");
+  if(!t)return showErr("login-error","Sélectionnez un type de compte.");
+  if(t==="prof"&&u.toLowerCase()!==APP.teacher.username.toLowerCase()&&u.toLowerCase()!==ADMIN_EMAIL)return showErr("login-error","Nom professeur inconnu.");
+  APP.user=u;APP.type=t;
+  document.getElementById("page-login").classList.add("hidden");
+  document.getElementById("page-password").classList.remove("hidden");
+  if(t==="eleve"){
+    document.getElementById("pin-container").classList.remove("hidden");
+    document.getElementById("pwd-container").classList.add("hidden");
+    document.getElementById("pwd-subtitle").textContent="Bonjour "+u+" ! Code à 4 chiffres.";
+    for(let i=1;i<=4;i++)document.getElementById("pin"+i).value="";
+    setTimeout(()=>document.getElementById("pin1").focus(),100);
+  }else{
+    document.getElementById("pin-container").classList.add("hidden");
+    document.getElementById("pwd-container").classList.remove("hidden");
+    document.getElementById("pwd-subtitle").textContent="Bonjour Coach !";
+    document.getElementById("pwd-input").value="";
+    setTimeout(()=>document.getElementById("pwd-input").focus(),100);
+  }
+}
+var _loggingIn=false;
+async function validatePassword(){
+  if(_loggingIn)return;
+  var raw;
+  if(APP.type==="eleve"){raw=[1,2,3,4].map(function(i){return document.getElementById("pin"+i).value;}).join("");if(raw.length<4)return showErr("pwd-error","Entrez les 4 chiffres.");}
+  else{raw=document.getElementById("pwd-input").value;if(!raw)return showErr("pwd-error","Entrez le mot de passe.");}
+  if(!FB.auth)return showErr("pwd-error","Connexion au serveur impossible.");
+  var email=APP.type==="prof"?ADMIN_EMAIL:acctEmail("eleve",APP.user);
+  var pwd=APP.type==="prof"?raw:acctPwd(raw);
+  _loggingIn=true;
+  try{
+    var cred=await FB.auth.signInWithEmailAndPassword(email,pwd);var uid=cred.user.uid;
+    if(APP.type==="prof"){
+      if((cred.user.email||"").toLowerCase()!==ADMIN_EMAIL)throw {code:"auth/invalid-credential"};
+      startSync("prof",uid);openTeacher();checkLegacy();
+    }else{
+      var s=(await fbRef(NS+"/students/"+uid).once("value")).val();if(!s)throw {code:"app/no-profile"};
+      s.uid=uid;_me=s;APP.user=s.name;startSync("eleve",uid);APP.students=[s];openStudent(s);
+    }
+  }catch(e){
+    if(FB.auth.currentUser){try{await FB.auth.signOut();}catch(x){}}
+    showErr("pwd-error",authMsg(e));
+  }finally{_loggingIn=false;}
+}
+function logout(){
+  Promise.resolve(stopTrack()).finally(function(){fbOffAll();if(FB.auth)FB.auth.signOut().catch(function(){});snmReset();});
+  _me=null;APP.user=null;APP.type=null;
+  ["page-student","page-teacher"].forEach(p=>document.getElementById(p).classList.add("hidden"));
+  document.getElementById("page-login").classList.remove("hidden");
+  document.getElementById("login-username").value="";document.getElementById("login-type").value="";
+}
+function changeClass(lv){APP.currentClass=lv;renderSidebar(_me);closeDD();document.getElementById("student-content").innerHTML='<div class="welcome-msg"><h2>Niveau '+fmtLvl(lv)+'</h2><p style="color:#888">Sélectionnez un cours.</p></div>';}
+
+// ---------- Professeur : élèves
+async function deleteStudent(i){
+  const s=APP.students[i];
+  if(!confirm("Supprimer l'élève "+s.name+" ? Cette action est irréversible."))return;
+  try{await secWith(acctEmail("eleve",s.name),acctPwd(s.password),function(u){return u.delete();});}
+  catch(e){console.warn("Compte de connexion non supprimé :",e&&e.code);}
+  var u={};["students","timeTracker","comments","attachments"].forEach(function(k){u[NS+"/"+k+"/"+s.uid]=null;});
+  fbRef("/").update(u).catch(fbErr);
+}
+async function addStudent(){
+  const n=document.getElementById("new-st-name").value.trim();
+  const l=document.getElementById("new-st-level").value;
+  const p=document.getElementById("new-st-pwd").value.trim();
+  if(!n)return showErr("add-st-error","Entrez le nom.");
+  if(!/^\d{4}$/.test(p))return showErr("add-st-error","4 chiffres requis.");
+  if(APP.students.some(s=>s.name.toLowerCase()===n.toLowerCase()))return showErr("add-st-error","Existe déjà.");
+  try{
+    var uid=await secCreate(acctEmail("eleve",n),acctPwd(p));
+    await fbRef(NS+"/students/"+uid).set({name:n,level:l,levels:[l],password:p});
+  }catch(e){return showErr("add-st-error",authMsg(e));}
+  hideModal("modal-add-student");
+  document.getElementById("new-st-name").value="";document.getElementById("new-st-pwd").value="";
+}
+function saveLevels(){
+  const lvs=Array.from(document.querySelectorAll("#ml-list input:checked")).map(c=>c.value);
+  if(!lvs.length)return alert("Au moins un niveau.");
+  const s=APP.students[APP.editIdx];
+  fbRef(NS+"/students/"+s.uid).update({levels:lvs,level:lvs[0]}).then(function(){hideModal("modal-level");}).catch(fbErr);
+}
+function saveCourses(){
+  const s=APP.students[APP.editIdx];const lvs=s.levels||[s.level];const ul={};
+  lvs.forEach(lv=>{ul[lv]=Array.from(document.querySelectorAll('#mc-list input[data-level="'+lv+'"]')).filter(c=>c.checked).map(c=>c.value);});
+  fbRef(NS+"/students/"+s.uid+"/unlockedCourses").set(ul).then(function(){hideModal("modal-courses");}).catch(fbErr);
+}
+async function changePwd(){
+  const p=document.getElementById("mp-new").value.trim();
+  if(!/^\d{4}$/.test(p))return alert("4 chiffres requis.");
+  const s=APP.students[APP.editIdx];
+  try{
+    await secWith(acctEmail("eleve",s.name),acctPwd(s.password),function(u){return u.updatePassword(acctPwd(p));});
+    await fbRef(NS+"/students/"+s.uid+"/password").set(p);
+    hideModal("modal-password");
+  }catch(e){alert(authMsg(e));}
+}
+function sidOfKey(k){var s=APP.students.find(function(x){return k.slice(-(x.name.length+1))==="_"+x.name;});return s?{s:s,cid:k.slice(0,k.length-s.name.length-1)}:null;}
+function saveCmt(k,v){var r=sidOfKey(k);if(!r)return;APP.comments[k]=v;fbRef(NS+"/comments/"+r.s.uid+"/"+r.cid).set(v||null).catch(fbErr);}
+function attachFile(ck,input){
+  if(!input.files||!input.files[0])return;
+  var file=input.files[0];if(file.size>3*1024*1024)return alert("Fichier trop volumineux (3 Mo maximum).");
+  var r=sidOfKey(ck);if(!r)return;
+  var reader=new FileReader();
+  reader.onload=function(e){
+    var att={name:file.name,data:e.target.result,type:file.type};
+    fbRef(NS+"/attachments/"+r.s.uid+"/"+r.cid).set(att).then(function(){APP.attachments[ck]=att;var el=document.getElementById("att-"+ck);if(el)el.textContent=file.name;}).catch(fbErr);
+  };
+  reader.readAsDataURL(file);
+}
+
+// ---------- Professeur : demandes (contenu échappé)
+function renderProfReq(tab){
+  const body=document.getElementById("prof-req-body");
+  const none=function(t){body.innerHTML='<p style="color:#888;text-align:center;padding:20px">'+t+'</p>';};
+  if(tab==="demandes"){
+    const jr=APP.joinRequests||[];if(!jr.length)return none("Aucune demande d'intégration.");
+    let h="";jr.forEach((r,i)=>{h+='<div class="request-panel"><h4>'+esc(r.name)+'</h4><p class="request-meta">'+esc(r.date)+'</p>';if(r.email)h+='<p style="color:#c8a84e;font-size:.9rem">✉ '+esc(r.email)+'</p>';if(r.phone)h+='<p style="color:#c8a84e;font-size:.9rem">☎ '+esc(r.phone)+'</p>';h+='<div class="request-body">'+esc(r.message)+'</div><button class="btn btn-small" style="background:#e74c3c;color:#fff;margin-top:8px" onclick="deleteJoin('+i+')">Supprimer</button></div>';});
+    body.innerHTML=h;return;
+  }
+  if(tab==="questions"){
+    const uq=APP.requests.questions.filter(q=>!q.response);if(!uq.length)return none("Aucune question.");
+    let h="";uq.forEach((q,i)=>{h+='<div class="request-panel"><h4>'+esc(q.student)+'</h4><p class="request-meta">'+esc(q.date)+'</p><div class="request-body">'+esc(q.question)+'</div><button class="btn btn-small btn-primary" onclick="openRespond('+i+')">Répondre</button></div>';});
+    body.innerHTML=h;
+  }else{
+    const pr=APP.requests.revisions.filter(r=>r.status==="pending");if(!pr.length)return none("Aucune demande.");
+    let h="";pr.forEach((r,i)=>{h+='<div class="revision-item"><div class="revision-info"><strong>'+esc(r.student)+'</strong><br><span style="font-size:.82rem;color:#888">'+esc(r.date)+' '+esc(r.start)+'-'+esc(r.end)+'</span></div><div class="revision-actions"><span class="revision-accept" onclick="handleRev('+i+',&quot;accepted&quot;)" title="Accepter">✓</span><span class="revision-reject" onclick="handleRev('+i+',&quot;rejected&quot;)" title="Refuser">✗</span></div></div>';});
+    body.innerHTML=h;
+  }
+}
+function deleteJoin(i){fbRef(NS+"/joinRequests/"+APP.joinRequests[i]._k).remove().then(function(){APP.joinRequests.splice(i,1);renderProfReq("demandes");}).catch(fbErr);}
+function sendResponse(){
+  const t=document.getElementById("modal-respond-text").value.trim();if(!t)return alert("Écrivez une réponse.");
+  const q=APP.requests.questions[APP._rIdx];
+  fbRef(NS+"/questions/"+q._k+"/response").set(t).then(function(){q.response=t;hideModal("modal-respond");renderProfReq("questions");}).catch(fbErr);
+}
+function handleRev(ri,status){
+  const r=APP.requests.revisions.filter(x=>x.status==="pending")[ri];
+  fbRef(NS+"/revisions/"+r._k+"/status").set(status).then(function(){r.status=status;renderProfReq("revisions");}).catch(fbErr);
+}
+
+// ---------- Élève : demandes
+function sendQuestion(){
+  const t=document.getElementById("req-question-text").value.trim();if(!t)return alert("Écrivez votre question.");
+  fbRef(NS+"/questions").push({student:_me.name,studentUid:_me.uid,question:t.slice(0,5000),date:new Date().toLocaleDateString("fr-FR")})
+    .then(function(){document.getElementById("req-question-text").value="";closeDD();alert("Question envoyée !");}).catch(fbErr);
+}
+function sendRevision(){
+  const d=document.getElementById("req-date").value;if(!d)return alert("Sélectionnez une date.");
+  fbRef(NS+"/revisions").push({student:_me.name,studentUid:_me.uid,date:d,start:document.getElementById("req-time-start").value,end:document.getElementById("req-time-end").value,status:"pending"})
+    .then(function(){closeDD();alert("Demande envoyée !");}).catch(fbErr);
+}
+function sendJoin(){
+  const n=document.getElementById("join-name").value.trim(),e=document.getElementById("join-email").value.trim(),p=document.getElementById("join-phone").value.trim(),m=document.getElementById("join-msg").value.trim();
+  if(!n||!e||!m)return alert("Remplissez au moins le nom, l'email et le message.");
+  fbRef(NS+"/joinRequests").push({name:n.slice(0,200),email:e.slice(0,200),phone:p.slice(0,50),message:m.slice(0,3000),date:new Date().toLocaleDateString("fr-FR")})
+    .then(function(){hideModal("modal-join");alert("Message envoyé au professeur !");}).catch(fbErr);
+}
+
+// ---------- Migration des anciennes données (dossier ouvert « appData »)
+function checkLegacy(){
+  fbRef(LEGACY).once("value").then(function(s){
+    if(!s.exists()||document.getElementById("legacy-box"))return;
+    var box=document.createElement("div");box.id="legacy-box";
+    box.style.cssText="background:rgba(231,76,60,.12);border:1px solid #e74c3c;border-radius:10px;padding:14px 16px;margin:0 0 18px;color:#eee";
+    box.innerHTML='<strong style="color:#ff6b6b">Anciennes données non sécurisées détectées.</strong><p style="margin:6px 0 10px;font-size:.9rem">Importe-les dans le nouveau système (création des comptes élèves avec leurs codes actuels), puis supprime l\'ancienne copie.</p><button class="btn btn-small btn-primary" onclick="migrateLegacy()">Importer les anciennes données</button> <span id="legacy-status" style="font-size:.85rem;color:#aaa;margin-left:8px"></span>';
+    var t=document.getElementById("teacher-list");var cont=t?t.closest("table").parentNode:document.getElementById("page-teacher");
+    cont.insertBefore(box,t?t.closest("table"):cont.firstChild);
+  }).catch(function(){});
+}
+async function migrateLegacy(){
+  var stEl=document.getElementById("legacy-status");function st(t){if(stEl)stEl.textContent=t;}
+  if(!confirm("Importer les anciennes données ? Cela peut prendre une minute."))return;
+  try{
+    var AR=function(x){return Array.isArray(x)?x.filter(Boolean):Object.values(x||{});};
+    var L=(await fbRef(LEGACY).once("value")).val()||{};
+    var students=AR(L.students),sid={},errors=[],u={};
+    for(var j=0;j<students.length;j++){var s=students[j];st("Élève "+(j+1)+"/"+students.length+"…");
+      try{var id=await secEnsure(acctEmail("eleve",s.name),acctPwd(s.password||""));sid[s.name]=id;
+        u[NS+"/students/"+id]={name:s.name,level:s.level||(s.levels||["6eme"])[0],levels:s.levels||[s.level||"6eme"],password:s.password||"",unlockedCourses:s.unlockedCourses||{}};
+      }catch(e){errors.push("Élève "+s.name+" : "+authMsg(e));}}
+    Object.keys(L.timeTracker||{}).forEach(function(n){if(sid[n])u[NS+"/timeTracker/"+sid[n]]=L.timeTracker[n];});
+    var byKey=function(obj,dest){Object.keys(obj||{}).forEach(function(k){Object.keys(sid).forEach(function(n){if(k.slice(-(n.length+1))==="_"+n&&obj[k])u[NS+"/"+dest+"/"+sid[n]+"/"+k.slice(0,k.length-n.length-1)]=obj[k];});});};
+    byKey(L.comments,"comments");byKey(L.attachments,"attachments");
+    var R=L.requests||{};
+    ["questions","revisions"].forEach(function(kind){AR(R[kind]).forEach(function(q){var o=Object.assign({},q);if(sid[q.student])o.studentUid=sid[q.student];Object.keys(o).forEach(function(x){if(o[x]==null)delete o[x];});u[NS+"/"+kind+"/"+fbRef(NS+"/"+kind).push().key]=o;});});
+    AR(L.joinRequests).forEach(function(j){u[NS+"/joinRequests/"+fbRef(NS+"/joinRequests").push().key]=j;});
+    st("Enregistrement…");await fbRef("/").update(u);
+    var msg="Import terminé : "+Object.keys(sid).length+" élève(s).";
+    if(errors.length)msg+="\n\nProblèmes :\n- "+errors.join("\n- ");
+    alert(msg);
+    if(confirm("Supprimer maintenant l'ancienne copie non sécurisée (appData) ?\n(Recommandé si l'import s'est bien passé.)")){await fbRef(LEGACY).remove();var b=document.getElementById("legacy-box");if(b)b.remove();}
+    else st("Import terminé — ancienne copie conservée.");
+  }catch(e){st("");alert("Échec de l'import : "+authMsg(e));}
+}
+
 </script>
 </body>
 </html>
